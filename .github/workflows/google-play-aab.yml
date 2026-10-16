@@ -1,0 +1,95 @@
+name: Google Play - AAB firmado
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-play-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Extraer proyecto Android
+        id: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p _android_release
+          unzip -q autoarpa-android.zip -d _android_release
+          settings=$(find _android_release -type f \( -name settings.gradle.kts -o -name settings.gradle \) | head -n 1)
+          if [ -z "$settings" ]; then
+            echo "::error::No se encontro settings.gradle o settings.gradle.kts en autoarpa-android.zip"
+            exit 1
+          fi
+          project=$(dirname "$settings")
+          echo "project=$project" >> "$GITHUB_OUTPUT"
+
+      - name: Preparar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar SDK Android 36, NDK y CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Preparar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Compilar Android App Bundle (release)
+        working-directory: ${{ steps.android.outputs.project }}
+        shell: bash
+        run: gradle bundleRelease --no-daemon --stacktrace
+
+      - name: Firmar AAB mediante secretos de GitHub
+        env:
+          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+          PLAY_UPLOAD_STORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_STORE_PASSWORD }}
+          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_UPLOAD_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
+          PROJECT: ${{ steps.android.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in PLAY_UPLOAD_KEYSTORE_BASE64 PLAY_UPLOAD_STORE_PASSWORD PLAY_UPLOAD_KEY_PASSWORD PLAY_UPLOAD_KEY_ALIAS; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Falta el secreto $key. Consulta docs/publicacion-google-play.md"
+              exit 1
+            fi
+          done
+
+          bundle=$(find "$PROJECT/app/build/outputs/bundle/release" -maxdepth 1 -type f -name '*.aab' | head -n 1)
+          if [ -z "$bundle" ]; then
+            echo "::error::La compilacion no produjo un archivo .aab"
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$PLAY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/play-upload.jks"
+          jarsigner -keystore "$RUNNER_TEMP/play-upload.jks" \
+            -storepass:env PLAY_UPLOAD_STORE_PASSWORD \
+            -keypass:env PLAY_UPLOAD_KEY_PASSWORD \
+            -sigalg SHA256withRSA -digestalg SHA-256 \
+            "$bundle" "$PLAY_UPLOAD_KEY_ALIAS"
+          jarsigner -verify -strict "$bundle"
+          mkdir -p "$RUNNER_TEMP/google-play"
+          cp "$bundle" "$RUNNER_TEMP/google-play/AutoHarpLab-release.aab"
+          rm -f "$RUNNER_TEMP/play-upload.jks"
+
+      - name: Descargar AAB firmado
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoHarpLab-GooglePlay-AAB
+          path: ${{ runner.temp }}/google-play/AutoHarpLab-release.aab
+          if-no-files-found: error
+          retention-days: 14
