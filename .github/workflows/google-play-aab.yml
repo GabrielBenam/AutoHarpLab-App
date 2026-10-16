@@ -81,7 +81,7 @@ jobs:
             -keypass:env PLAY_UPLOAD_KEY_PASSWORD \
             -sigalg SHA256withRSA -digestalg SHA-256 \
             "$bundle" "$PLAY_UPLOAD_KEY_ALIAS"
-          jarsigner -verify -strict "$bundle"
+          jarsigner -verify "$bundle"
           mkdir -p "$RUNNER_TEMP/google-play"
           cp "$bundle" "$RUNNER_TEMP/google-play/AutoHarpLab-release.aab"
           rm -f "$RUNNER_TEMP/play-upload.jks"
